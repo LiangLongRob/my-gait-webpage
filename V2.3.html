@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智慧步態與疲勞監控語音系統（即時首發+採樣過濾版）</title>
+    <style>
+        body { font-family: sans-serif; max-width: 650px; margin: 40px auto; padding: 20px; }
+        .log-box { background: #f4f4f4; padding: 15px; border-radius: 5px; height: 280px; overflow-y: auto; margin-top: 20px; border: 1px solid #ddd; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; margin-right: 10px; }
+        .status-badge { display: inline-block; padding: 5px 10px; border-radius: 4px; font-weight: bold; background: #e0e0e0; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+    <h2>智慧步態與疲勞監控語音系統</h2>
+    <p>點擊下方按鈕啟動系統（解鎖瀏覽器語音權限）：</p>
+    <button id="startBtn">啟動系統</button>
+    <button id="stopBtn" disabled>停止系統</button>
+
+    <div>目前狀態代碼：<span id="currentCode" style="font-family: monospace; font-weight: bold;">--</span></div>
+    <div>目前狀態：<span id="currentStatus" class="status-badge">尚未啟動</span></div>
+
+    <div class="log-box" id="logBox">系統日誌：等待啟動...</div>
+
+    <!-- 載入 Firebase 模組 -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // 你的 Firebase 專案設定
+        const firebaseConfig = {
+            apiKey: "AIzaSyD16GHbmVmOuW51aQE_vSBv-uMGP5Icnho",
+            authDomain: "testapi-767cf.firebaseapp.com",
+            projectId: "testapi-767cf",
+            storageBucket: "testapi-767cf.firebasestorage.app",
+            messagingSenderId: "981414269340",
+            appId: "1:981414269340:web:9a7cbc3ff75a313b5bb859",
+            measurementId: "G-4TXE2TVTWM"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const logBox = document.getElementById('logBox');
+        const currentCodeSpan = document.getElementById('currentCode');
+        const currentStatusSpan = document.getElementById('currentStatus');
+        
+        let unsubscribe = null;
+        let sampleInterval = null; 
+
+        // 核心邏輯變數
+        let lastLoggedCode = "";       // 上一次成功紀錄並播報的代碼
+        let lastLoggedTime = 0;        // 上一次成功紀錄的時間戳記
+        let latestReceivedCode = "";   // 暫存最新收到的代碼
+        let hasPendingUpdate = false;  // 標記在冷卻期間是否有收到新資料
+        const COOLDOWN_TIME = 3000;    // 冷卻／採樣間隔：3秒 (3000毫秒)
+
+        // 內建事件編號對應表
+        const eventTable = {
+            "S00": "狀態正常。",
+            "S11": "膝部活動能力下降，建議縮短步長，增加擺盪時間。",
+            "S12": "步態不對稱，建議縮短步長，提高第二步延遲時間。",
+            "S13": "步與步間距過窄，建議調高步與步間距。",
+            "S14": "步與步間距過寬，建議縮短步與步間距。",
+            "S15": "初期疲勞狀態，建議縮短步長，提高第二步延遲時間，將輔助出力提升至60%。",
+            "S16": "中期疲勞狀態，建議縮短步長，提高第二步延遲時間，將輔助出力提升至80%。",
+            "S21": "高度疲勞狀態，請大幅縮短步長，提高第二步延遲時間，將輔助出力提升至100%。",
+            "S22": "足部離地不足，請增加離地高度，適度增加擺盪時間。",
+            "S23": "檢測到抬腿困難，請縮短步長，增加離地高度，增加擺盪時間。",
+            "S31": "步態異常，控制不穩，請立即縮短步長。",
+            "S32": "多個步態指標同時持續惡化，請立即停止，並檢視使用者狀態。",
+            "S33": "身體穩定度下降，請立即停止，並檢視使用者狀態。",
+            "S40": "感測器異常，請重新檢查設備。"
+        };
+
+        // 執行畫面更新、Log 紀錄與語音播放
+        function executeEvent(code) {
+            const message = eventTable[code];
+            if (!message) return;
+
+            currentCodeSpan.textContent = code;
+            currentStatusSpan.textContent = message;
+
+            if (code === "S00") {
+                currentStatusSpan.style.background = "#d4edda";
+                currentStatusSpan.style.color = "#155724";
+            } else if (["S21", "S32", "S33", "S40"].includes(code)) {
+                currentStatusSpan.style.background = "#f8d7da";
+                currentStatusSpan.style.color = "#721c24";
+            } else {
+                currentStatusSpan.style.background = "#fff3cd";
+                currentStatusSpan.style.color = "#856404";
+            }
+
+            const timestamp = new Date().toLocaleTimeString();
+            const logItem = document.createElement('div');
+            logItem.innerHTML = `<b>[${timestamp}] (${code})</b> ${message}`;
+            logBox.appendChild(logItem);
+            logBox.scrollTop = logBox.scrollHeight;
+
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                const utterance = new SpeechSynthesisUtterance(message);
+                utterance.lang = 'zh-TW';
+                utterance.rate = 1.0;
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+
+        // 啟動按鈕事件
+        startBtn.addEventListener('click', () => {
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            currentStatusSpan.textContent = "監聽中（支援即時首發）...";
+            logBox.innerHTML += '<div>[系統] 已連線至 Firebase，啟動監聽...</div>';
+
+            // 重置狀態
+            lastLoggedCode = "";
+            lastLoggedTime = 0;
+            latestReceivedCode = "";
+            hasPendingUpdate = false;
+
+            const docRef = doc(db, "notifications", "status");
+            
+            // 1. 監聽 Firebase 變動
+            unsubscribe = onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    const statusCode = data.code;
+                    if (!statusCode || !eventTable[statusCode]) return;
+
+                    latestReceivedCode = statusCode;
+                    const now = Date.now();
+
+                    // 關鍵改良：檢查目前是否處於「冷卻時間外」？
+                    if (now - lastLoggedTime >= COOLDOWN_TIME || lastLoggedTime === 0) {
+                        // 【不在冷卻中】或【首次收到】：立刻反應！不需要等 3 秒
+                        if (latestReceivedCode !== lastLoggedCode) {
+                            console.log(`[即時首發] 立即執行：${latestReceivedCode}`);
+                            executeEvent(latestReceivedCode);
+                            lastLoggedCode = latestReceivedCode;
+                            lastLoggedTime = Date.now(); // 重新起算 3 秒冷卻窗
+                            hasPendingUpdate = false;
+                        } else {
+                            console.log(`[即時略過] 狀態與上次相同 (${latestReceivedCode})`);
+                            lastLoggedTime = Date.now(); // 刷新時間避免頻繁觸發
+                        }
+                    } else {
+                        // 【正在 3 秒冷卻中】：先默默暫存起來，標記有新資料
+                        hasPendingUpdate = true;
+                        console.log(`[冷卻暫存] 暫存中：${latestReceivedCode}`);
+                    }
+                }
+            }, (error) => {
+                console.error("監聽發生錯誤：", error);
+                logBox.innerHTML += `<div style="color:red;">[錯誤] ${error.message}</div>`;
+            });
+
+            // 2. 背景計時器：負責在 3 秒冷卻結束時，結算這段期間累積的最後狀態
+            sampleInterval = setInterval(() => {
+                const now = Date.now();
+
+                // 如果剛好跨過 3 秒冷卻期，且這段期間有被塞過新資料
+                if (now - lastLoggedTime >= COOLDOWN_TIME && hasPendingUpdate) {
+                    hasPendingUpdate = false; // 重置標記
+
+                    if (latestReceivedCode !== lastLoggedCode) {
+                        console.log(`[冷卻結算執行] 採用最終穩定狀態：${latestReceivedCode}`);
+                        executeEvent(latestReceivedCode);
+                        lastLoggedCode = latestReceivedCode;
+                    } else {
+                        console.log(`[冷卻結算略過] 繞了一圈最終狀態與上次相同 (${latestReceivedCode})`);
+                    }
+                    
+                    lastLoggedTime = Date.now(); // 再次更新基準時間
+                }
+            }, 500); // 每 0.5 秒檢查一次，使結算更靈敏
+        });
+
+        // 停止按鈕事件
+        stopBtn.addEventListener('click', () => {
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            currentCodeSpan.textContent = "--";
+            currentStatusSpan.textContent = "已停止";
+            currentStatusSpan.style.background = "#e0e0e0";
+            currentStatusSpan.style.color = "#000";
+            
+            if (unsubscribe) {
+                unsubscribe();
+            }
+            if (sampleInterval) {
+                clearInterval(sampleInterval);
+            }
+            window.speechSynthesis.cancel();
+            logBox.innerHTML += '<div>[系統] 已停止監聽。</div>';
+        });
+    </script>
+
+</body>
+</html>
