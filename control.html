@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>步態系統手動控制台</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 30px auto; padding: 20px; }
+        .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
+        button { padding: 12px; font-size: 15px; cursor: pointer; text-align: left; border-radius: 5px; border: 1px solid #ccc; background: #f9f9f9; }
+        button:hover { background: #e2e2e2; }
+        button.danger { background: #f8d7da; color: #721c24; border-color: #f5c6cb; }
+        button.success { background: #d4edda; color: #155724; border-color: #c3e6cb; }
+        #statusMsg { margin-top: 15px; font-weight: bold; color: green; }
+    </style>
+</head>
+<body>
+
+    <h2>步態系統手動控制台</h2>
+    <p>點擊下方按鈕，即可立即發送代碼至 Firebase，連線的語音端會即時反應：</p>
+
+    <div id="statusMsg"></div>
+
+    <div class="btn-grid">
+        <button class="success" onclick="sendCode('S00')"><b>S00</b> - 狀態正常</button>
+        <button onclick="sendCode('S11')"><b>S11</b> - 膝部活動能力下降</button>
+        <button onclick="sendCode('S12')"><b>S12</b> - 步態不對稱</button>
+        <button onclick="sendCode('S13')"><b>S13</b> - 步與步間距過窄</button>
+        <button onclick="sendCode('S14')"><b>S14</b> - 步與步間距過寬</button>
+        <button onclick="sendCode('S15')"><b>S15</b> - 初期疲勞 (出力60%)</button>
+        <button onclick="sendCode('S16')"><b>S16</b> - 中期疲勞 (出力80%)</button>
+        <button class="danger" onclick="sendCode('S21')"><b>S21</b> - 高度疲勞 (出力100%)</button>
+        <button onclick="sendCode('S22')"><b>S22</b> - 足部離地不足</button>
+        <button onclick="sendCode('S23')"><b>S23</b> - 檢測到抬腿困難</button>
+        <button class="danger" onclick="sendCode('S31')"><b>S31</b> - 步態異常控制不穩</button>
+        <button class="danger" onclick="sendCode('S32')"><b>S32</b> - 多指標惡化 (請停止)</button>
+        <button class="danger" onclick="sendCode('S33')"><b>S33</b> - 身體穩定度下降</button>
+        <button class="danger" onclick="sendCode('S40')"><b>S40</b> - 感測器異常</button>
+    </div>
+
+    <!-- 載入 Firebase 模組 -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // 使用你的 Firebase 設定
+        const firebaseConfig = {
+            apiKey: "AIzaSyD16GHbmVmOuW51aQE_vSBv-uMGP5Icnho",
+            authDomain: "testapi-767cf.firebaseapp.com",
+            projectId: "testapi-767cf",
+            storageBucket: "testapi-767cf.firebasestorage.app",
+            messagingSenderId: "981414269340",
+            appId: "1:981414269340:web:9a7cbc3ff75a313b5bb859",
+            measurementId: "G-4TXE2TVTWM"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const statusMsg = document.getElementById('statusMsg');
+
+        // 宣告全域函數讓 HTML 的 onclick 可以呼叫
+        window.sendCode = async function(code) {
+            try {
+                // 將資料寫入 notifications 集合底下的 status 文件
+                // 使用 setDoc 會直接覆蓋該文件的內容，非常乾淨迅速
+                await setDoc(doc(db, "notifications", "status"), {
+                    code: code,
+                    updatedAt: new Date().toISOString()
+                });
+                
+                statusMsg.textContent = `成功發送代碼：${code} (${new Date().toLocaleTimeString()})`;
+                statusMsg.style.color = "green";
+            } catch (error) {
+                console.error("寫入失敗：", error);
+                statusMsg.textContent = `發送失敗：${error.message}`;
+                statusMsg.style.color = "red";
+            }
+        };
+    </script>
+
+</body>
+</html>
