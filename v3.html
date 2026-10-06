@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智慧步態與疲勞監控語音系統（介面升級版）</title>
+    <style>
+        body { font-family: sans-serif; max-width: 650px; margin: 30px auto; padding: 20px; }
+        
+        /* 系統控制與狀態按鈕 */
+        .control-panel { margin-bottom: 20px; }
+        button { padding: 8px 16px; font-size: 15px; cursor: pointer; margin-right: 10px; }
+
+        /* 狀態顯示大區塊 */
+        .display-container { background: #fdfdfd; border: 2px solid #ddd; padding: 20px; border-radius: 8px; margin-bottom: 15px; text-align: center; }
+        
+        /* 字形較大的區塊：顯示狀態 */
+        #currentStatusBig { 
+            font-size: 48px; /* 預設大小，可由上方選單調整 */
+            font-weight: bold; 
+            margin-bottom: 10px; 
+            transition: color 0.3s;
+        }
+
+        /* 字形較小的區塊：顯示建議 */
+        #currentAdviceSmall { 
+            font-size: 14px; /* 預設大小，可由上方選單調整 */
+            color: #555; 
+            min-height: 27px; /* 保持高度避免跳動 */
+        }
+
+        /* 縮小的 Log 區塊 */
+        .log-box { background: #f4f4f4; padding: 10px; border-radius: 5px; height: 150px; overflow-y: auto; font-size: 13px; border: 1px solid #ddd; }
+        
+        .code-tag { font-family: monospace; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h2>智慧步態與疲勞監控語音系統</h2>
+    
+    <div class="control-panel">
+        <button id="startBtn">啟動系統</button>
+        <button id="stopBtn" disabled>停止系統</button>
+    </div>
+
+    <!-- 上方顯示狀態與建議的大區塊 -->
+    <div class="display-container">
+        <!-- 字形較大的區塊：顯示狀態 -->
+        <div id="currentStatusBig">等待啟動...</div>
+        <!-- 字形較小的區塊：顯示建議 (正常時留空) -->
+        <div id="currentAdviceSmall"></div>
+    </div>
+
+    <div>系統運行日誌：</div>
+    <div class="log-box" id="logBox">等待啟動...</div>
+
+    <!-- 載入 Firebase 模組 -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // 你的 Firebase 專案設定
+        const firebaseConfig = {
+            apiKey: "AIzaSyD16GHbmVmOuW51aQE_vSBv-uMGP5Icnho",
+            authDomain: "testapi-767cf.firebaseapp.com",
+            projectId: "testapi-767cf",
+            storageBucket: "testapi-767cf.firebasestorage.app",
+            messagingSenderId: "981414269340",
+            appId: "1:981414269340:web:9a7cbc3ff75a313b5bb859",
+            measurementId: "G-4TXE2TVTWM"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const logBox = document.getElementById('logBox');
+        const statusBig = document.getElementById('currentStatusBig');
+        const adviceSmall = document.getElementById('currentAdviceSmall');
+
+        let unsubscribe = null;
+        let sampleInterval = null; 
+
+        // 核心邏輯變數
+        let lastLoggedCode = "";       
+        let lastLoggedTime = 0;        
+        let latestReceivedCode = "";   
+        let hasPendingUpdate = false;  
+        const COOLDOWN_TIME = 3000;    
+
+        // 結構化事件對應表（拆分為「狀態標題」與「語音/建議內容」）
+        const eventTable = {
+            "S00": { title: "狀態正常", advice: "" },
+            "S11": { title: "膝部活動能力下降", advice: "建議縮短步長，增加擺盪時間。" },
+            "S12": { title: "步態不對稱", advice: "建議縮短步長，提高第二步延遲時間。" },
+            "S13": { title: "步與步間距過窄", advice: "建議調高步與步間距。" },
+            "S14": { title: "步與步間距過寬", advice: "建議縮短步與步間距。" },
+            "S15": { title: "初期疲勞狀態", advice: "建議縮短步長，提高第二步延遲時間，將輔助出力提升至60%。" },
+            "S16": { title: "中期疲勞狀態", advice: "建議縮短步長，提高第二步延遲時間，將輔助出力提升至80%。" },
+            "S21": { title: "高度疲勞狀態", advice: "請大幅縮短步長，提高第二步延遲時間，將輔助出力提升至100%。" },
+            "S22": { title: "足部離地不足", advice: "請增加離地高度，適度增加擺盪時間。" },
+            "S23": { title: "檢測到抬腿困難", advice: "請縮短步長，增加離地高度，增加擺盪時間。" },
+            "S31": { title: "步態異常控制不穩", advice: "請立即縮短步長。" },
+            "S32": { title: "多指標持續惡化", advice: "請立即停止，並檢視使用者狀態。" },
+            "S33": { title: "身體穩定度下降", advice: "請立即停止，並檢視使用者狀態。" },
+            "S40": { title: "感測器異常", advice: "請重新檢查設備。" }
+        };
+
+        // 執行畫面更新、字體顏色判定、Log 紀錄與語音播放
+        function executeEvent(code) {
+            const eventData = eventTable[code];
+            if (!eventData) return;
+
+            // 1. 更新大字狀態與小字建議
+            statusBig.textContent = eventData.title;
+            adviceSmall.textContent = eventData.advice; // S00 時為空字串，會自動留空
+
+            // 2. 依照編號規則調整大字顏色
+            if (code === "S00") {
+                statusBig.style.color = "#28a745"; // 綠色
+            } else if (code.startsWith("S1")) {
+                statusBig.style.color = "#212529"; // 黑色 (S1x)
+            } else if (code.startsWith("S2")) {
+                statusBig.style.color = "#fd7e14"; // 橘黃色 (S2x)
+            } else if (code.startsWith("S3")) {
+                statusBig.style.color = "#dc3545"; // 紅色 (S3x)
+            } else if (code === "S40") {
+                statusBig.style.color = "#8b4513"; // 褐色 (S40)
+            }
+
+            // 3. 記錄 Log (縮小版區塊)
+            const timestamp = new Date().toLocaleTimeString();
+            const logItem = document.createElement('div');
+            logItem.innerHTML = `[${timestamp}] <span class="code-tag">(${code})</span> ${eventData.advice ? eventData.advice : eventData.title}`;
+            logBox.appendChild(logItem);
+            logBox.scrollTop = logBox.scrollHeight;
+
+            // 4. 瀏覽器語音合成（將標題與建議組合起來唸出）
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                const speechText = eventData.advice ? `${eventData.title}。${eventData.advice}` : eventData.title;
+                const utterance = new SpeechSynthesisUtterance(speechText);
+                utterance.lang = 'zh-TW';
+                utterance.rate = 1.0;
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+
+        // 啟動按鈕事件
+        startBtn.addEventListener('click', () => {
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            statusBig.textContent = "監聽中...";
+            statusBig.style.color = "#6c757d";
+            logBox.innerHTML += '<div>[系統] 已連線至 Firebase，啟動監聽與採樣機制...</div>';
+
+            lastLoggedCode = "";
+            lastLoggedTime = 0;
+            latestReceivedCode = "";
+            hasPendingUpdate = false;
+
+            const docRef = doc(db, "notifications", "status");
+            
+            unsubscribe = onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    const statusCode = data.code;
+                    if (!statusCode || !eventTable[statusCode]) return;
+
+                    latestReceivedCode = statusCode;
+                    const now = Date.now();
+
+                    if (now - lastLoggedTime >= COOLDOWN_TIME || lastLoggedTime === 0) {
+                        if (latestReceivedCode !== lastLoggedCode) {
+                            executeEvent(latestReceivedCode);
+                            lastLoggedCode = latestReceivedCode;
+                            lastLoggedTime = Date.now();
+                            hasPendingUpdate = false;
+                        } else {
+                            lastLoggedTime = Date.now();
+                        }
+                    } else {
+                        hasPendingUpdate = true;
+                    }
+                }
+            }, (error) => {
+                console.error("監聽發生錯誤：", error);
+                logBox.innerHTML += `<div style="color:red;">[錯誤] ${error.message}</div>`;
+            });
+
+            sampleInterval = setInterval(() => {
+                const now = Date.now();
+                if (now - lastLoggedTime >= COOLDOWN_TIME && hasPendingUpdate) {
+                    hasPendingUpdate = false;
+
+                    if (latestReceivedCode !== lastLoggedCode) {
+                        executeEvent(latestReceivedCode);
+                        lastLoggedCode = latestReceivedCode;
+                    }
+                    lastLoggedTime = Date.now();
+                }
+            }, 500);
+        });
+
+        // 停止按鈕事件
+        stopBtn.addEventListener('click', () => {
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusBig.textContent = "已停止";
+            statusBig.style.color = "#6c757d";
+            adviceSmall.textContent = "";
+            
+            if (unsubscribe) {
+                unsubscribe();
+            }
+            if (sampleInterval) {
+                clearInterval(sampleInterval);
+            }
+            window.speechSynthesis.cancel();
+            logBox.innerHTML += '<div>[系統] 已停止監聽。</div>';
+        });
+    </script>
+
+</body>
+</html>
